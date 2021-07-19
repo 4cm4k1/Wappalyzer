@@ -87,12 +87,25 @@
 						}
 					},
           "dom": {
-						"type": "object",
-						"additionalProperties": false,
-						"patternProperties": {
-							"^.+$": {
-							}
-						}
+            "oneOf": [
+							{
+								"type": "array",
+								"items": {
+									"$ref": "#/definitions/non-empty-non-blank-string"
+								}
+							},
+							{
+								"$ref": "#/definitions/non-empty-non-blank-string"
+							},
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "patternProperties": {
+                  "^.+$": {
+                  }
+                }
+              }
+            ]
 					},
           "dns": {
 						"type": "object",
@@ -152,6 +165,19 @@
 							}
 						]
 					},
+					"magento": {
+						"oneOf": [
+							{
+								"type": "array",
+								"items": {
+									"$ref": "#/definitions/non-empty-non-blank-string"
+								}
+							},
+							{
+								"$ref": "#/definitions/non-empty-non-blank-string"
+							}
+						]
+					},
 					"certIssuer": {
 						"oneOf": [
 							{
@@ -179,6 +205,19 @@
 						]
 					},
 					"implies": {
+						"oneOf": [
+							{
+								"type": "array",
+								"items": {
+									"$ref": "#/definitions/non-empty-non-blank-string"
+								}
+							},
+							{
+								"$ref": "#/definitions/non-empty-non-blank-string"
+							}
+						]
+					},
+					"requires": {
 						"oneOf": [
 							{
 								"type": "array",

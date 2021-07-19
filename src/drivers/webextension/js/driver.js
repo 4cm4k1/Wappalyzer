@@ -1,6 +1,6 @@
 'use strict'
 /* eslint-env browser */
-/* globals chrome, Wappalyzer, Utils */
+/* globals chrome, Wappalyzer, Utils, next */
 
 const {
   setTechnologies,
@@ -14,7 +14,8 @@ const { agent, promisify, getOption, setOption, open, globEscape } = Utils
 
 const expiry = 1000 * 60 * 60 * 24
 
-const hostnameIgnoreList = /((local|dev(elop(ment)?)?|stag(e|ing)?|preprod|preview|test(ing)?|demo(shop)?|admin|cache)[.-]|localhost|wappalyzer|google|facebook|twitter|reddit|yahoo|wikipedia|amazon|youtube|\/admin|\.local|\.test|\.dev|\.netlify\.app|\.shopifypreview\.com|^[0-9.]+$)/
+const hostnameIgnoreList =
+  /\b((local|dev(elop(ment)?)?|stag(e|ing)?|preprod|preview|test(ing)?|[^a-z]demo(shop)?|cache)[.-]|localhost|((wappalyzer|google|facebook|twitter|reddit|yahoo|wikipedia|amazon|youtube)\.)|\.local|\.test|\.netlify\.app|\.shopifypreview\.com|^([0-9.]+|[\d.]+)$|^([a-f0-9:]+:+)+[a-f0-9]+$)/
 
 const xhrDebounce = []
 
@@ -41,9 +42,7 @@ const Driver = {
                 pattern: { regex, confidence },
                 version,
               }) => ({
-                technology: Wappalyzer.technologies.find(
-                  ({ name: _name }) => name === _name
-                ),
+                technology: getTechnology(name, true),
                 pattern: {
                   regex: new RegExp(regex, 'i'),
                   confidence,
@@ -73,7 +72,23 @@ const Driver = {
       types: ['xmlhttprequest'],
     })
 
-    chrome.tabs.onRemoved.addListener((id) => (Driver.cache.tabs[id] = null))
+    chrome.tabs.onRemoved.addListener((id) => delete Driver.cache.tabs[id])
+
+    chrome.tabs.onUpdated.addListener(async (id, { status, url }) => {
+      if (status === 'complete') {
+        ;({ url } = await promisify(chrome.tabs, 'get', id))
+      }
+
+      if (url) {
+        const { hostname } = new URL(url)
+
+        const cache = Driver.cache.hostnames[hostname]
+
+        Driver.cache.tabs[id] = cache ? resolve(cache.detections) : []
+
+        await Driver.setIcon(url, Driver.cache.tabs[id])
+      }
+    })
 
     // Enable messaging between scripts
     chrome.runtime.onMessage.addListener(Driver.onMessage)
@@ -87,10 +102,10 @@ const Driver = {
         'https://www.wappalyzer.com/installed/?utm_source=installed&utm_medium=extension&utm_campaign=wappalyzer'
       )
     } else if (version !== previous && upgradeMessage) {
-      open(
-        `https://www.wappalyzer.com/upgraded/?utm_source=upgraded&utm_medium=extension&utm_campaign=wappalyzer`,
-        false
-      )
+      // open(
+      //   `https://www.wappalyzer.com/upgraded/?utm_source=upgraded&utm_medium=extension&utm_campaign=wappalyzer`,
+      //   false
+      // )
     }
 
     await setOption('version', version)
@@ -104,7 +119,7 @@ const Driver = {
    */
   log(message, source = 'driver', type = 'log') {
     // eslint-disable-next-line no-console
-    console[type](`wappalyzer | ${source} |`, message)
+    console[type](message)
   },
 
   /**
@@ -160,17 +175,25 @@ const Driver = {
    * @param {String} url
    * @param {Array} js
    */
-  analyzeJs(url, js) {
+  async analyzeJs(url, js, requires) {
+    const technologies = requires
+      ? Wappalyzer.requires[requires].technologies
+      : Wappalyzer.technologies
+
     return Driver.onDetect(
       url,
       Array.prototype.concat.apply(
         [],
-        js.map(({ name, chain, value }) =>
-          analyzeManyToMany(
-            Wappalyzer.technologies.find(({ name: _name }) => name === _name),
-            'js',
-            { [chain]: [value] }
-          )
+        await Promise.all(
+          js.map(async ({ name, chain, value }) => {
+            await next()
+
+            return analyzeManyToMany(
+              technologies.find(({ name: _name }) => name === _name),
+              'js',
+              { [chain]: [value] }
+            )
+          })
         )
       )
     )
@@ -181,40 +204,63 @@ const Driver = {
    * @param {String} url
    * @param {Array} dom
    */
-  analyzeDom(url, dom) {
+  async analyzeDom(url, dom, requires) {
+    const technologies = requires
+      ? Wappalyzer.requires[requires].technologies
+      : Wappalyzer.technologies
+
     return Driver.onDetect(
       url,
       Array.prototype.concat.apply(
         [],
-        dom.map(({ name, selector, text, property, attribute, value }) => {
-          const technology = Wappalyzer.technologies.find(
-            ({ name: _name }) => name === _name
-          )
+        await Promise.all(
+          dom.map(
+            async (
+              { name, selector, exists, text, property, attribute, value },
+              index
+            ) => {
+              await next()
 
-          if (text) {
-            return analyzeManyToMany(technology, 'dom.text', {
-              [selector]: [text],
-            })
-          }
+              const technology = technologies.find(
+                ({ name: _name }) => name === _name
+              )
 
-          if (property) {
-            return analyzeManyToMany(technology, `dom.properties.${property}`, {
-              [selector]: [value],
-            })
-          }
-
-          if (attribute) {
-            return analyzeManyToMany(
-              technology,
-              `dom.attributes.${attribute}`,
-              {
-                [selector]: [value],
+              if (typeof exists !== 'undefined') {
+                return analyzeManyToMany(technology, 'dom.exists', {
+                  [selector]: [''],
+                })
               }
-            )
-          }
 
-          return []
-        })
+              if (typeof text !== 'undefined') {
+                return analyzeManyToMany(technology, 'dom.text', {
+                  [selector]: [text],
+                })
+              }
+
+              if (typeof property !== 'undefined') {
+                return analyzeManyToMany(
+                  technology,
+                  `dom.properties.${property}`,
+                  {
+                    [selector]: [value],
+                  }
+                )
+              }
+
+              if (typeof attribute !== 'undefined') {
+                return analyzeManyToMany(
+                  technology,
+                  `dom.attributes.${attribute}`,
+                  {
+                    [selector]: [value],
+                  }
+                )
+              }
+
+              return []
+            }
+          )
+        )
       )
     )
   },
@@ -243,7 +289,9 @@ const Driver = {
       return
     }
 
-    Driver.log({ source, func, args })
+    if (func !== 'log') {
+      Driver.log({ source, func, args })
+    }
 
     if (!Driver[func]) {
       Driver.error(new Error(`Method does not exist: Driver.${func}`))
@@ -256,6 +304,44 @@ const Driver = {
       .catch(Driver.error)
 
     return !!callback
+  },
+
+  async content(url, func, args) {
+    const [tab] = await promisify(chrome.tabs, 'query', {
+      url: globEscape(url),
+    })
+
+    if (!tab) {
+      return
+    }
+
+    if (tab.status !== 'complete') {
+      throw new Error(`Tab ${tab.id} not ready for sendMessage: ${tab.status}`)
+    }
+
+    return new Promise((resolve, reject) => {
+      chrome.tabs.sendMessage(
+        tab.id,
+        {
+          source: 'driver.js',
+          func,
+          args: args ? (Array.isArray(args) ? args : [args]) : [],
+        },
+        (response) => {
+          chrome.runtime.lastError
+            ? func === 'error'
+              ? resolve()
+              : Driver.error(
+                  new Error(
+                    `${
+                      chrome.runtime.lastError.message
+                    }: Driver.${func}(${JSON.stringify(args)})`
+                  )
+                )
+            : resolve(response)
+        }
+      )
+    })
   },
 
   /**
@@ -288,7 +374,9 @@ const Driver = {
             )
           })
 
-          Driver.onDetect(request.url, analyze({ headers })).catch(Driver.error)
+          Driver.onDetect(request.url, await analyze({ headers })).catch(
+            Driver.error
+          )
         }
       } catch (error) {
         Driver.error(error)
@@ -316,12 +404,13 @@ const Driver = {
     if (!xhrDebounce.includes(hostname)) {
       xhrDebounce.push(hostname)
 
-      setTimeout(() => {
+      setTimeout(async () => {
         xhrDebounce.splice(xhrDebounce.indexOf(hostname), 1)
 
-        Driver.onDetect(request.originUrl, analyze({ xhr: hostname })).catch(
-          Driver.error
-        )
+        Driver.onDetect(
+          request.originUrl,
+          await analyze({ xhr: hostname })
+        ).catch(Driver.error)
       }, 1000)
     }
   },
@@ -332,7 +421,7 @@ const Driver = {
    * @param {Object} items
    * @param {String} language
    */
-  async onContentLoad(url, items, language) {
+  async onContentLoad(url, items, language, requires) {
     try {
       const { hostname } = new URL(url)
 
@@ -348,7 +437,15 @@ const Driver = {
         {}
       )
 
-      await Driver.onDetect(url, analyze({ url, ...items }), language, true)
+      await Driver.onDetect(
+        url,
+        await analyze(
+          { url, ...items },
+          requires ? Wappalyzer.requires[requires].technologies : undefined
+        ),
+        language,
+        true
+      )
     } catch (error) {
       Driver.error(error)
     }
@@ -381,35 +478,54 @@ const Driver = {
    * @param {String} language
    * @param {Boolean} incrementHits
    */
-  async onDetect(url, detections = [], language, incrementHits = false) {
+  async onDetect(
+    url,
+    detections = [],
+    language,
+    incrementHits = false,
+    analyzeRequires = true
+  ) {
+    url = url.split('#')[0]
+
     if (!url || !detections.length) {
       return
     }
 
-    const { protocol, hostname } = new URL(url)
+    const { hostname } = new URL(url)
 
     // Cache detections
-    const cache = (Driver.cache.hostnames[hostname] = {
-      ...(Driver.cache.hostnames[hostname] || {
-        url: `${protocol}//${hostname}`,
-        detections: [],
-        hits: incrementHits ? 0 : 1,
-      }),
-      dateTime: Date.now(),
+    const cache = (Driver.cache.hostnames[hostname] = Driver.cache.hostnames[
+      hostname
+    ] || {
+      detections: [],
+      hits: incrementHits ? 0 : 1,
     })
+
+    cache.dateTime = Date.now()
 
     // Remove duplicates
     cache.detections = cache.detections
       .concat(detections)
       .filter(({ technology }) => technology)
+      .filter(
+        ({ technology: { name }, pattern: { regex } }, index, detections) =>
+          detections.findIndex(
+            ({ technology: { name: _name }, pattern: { regex: _regex } }) =>
+              name === _name &&
+              (!regex || regex.toString() === _regex.toString())
+          ) === index
+      )
+      .map((detection) => {
+        if (
+          detections.find(
+            ({ technology: { slug } }) => slug === detection.technology.slug
+          )
+        ) {
+          detection.lastUrl = url
+        }
 
-    cache.detections.filter(
-      ({ technology: { name }, pattern: { regex } }, index) =>
-        cache.detections.findIndex(
-          ({ technology: { name: _name }, pattern: { regex: _regex } }) =>
-            name === _name && (!regex || regex.toString() === _regex.toString())
-        ) === index
-    )
+        return detection
+      })
 
     cache.hits += incrementHits ? 1 : 0
     cache.language = cache.language || language
@@ -431,17 +547,18 @@ const Driver = {
     await setOption(
       'hostnames',
       Object.keys(Driver.cache.hostnames).reduce(
-        (cache, hostname) => ({
-          ...cache,
+        (hostnames, hostname) => ({
+          ...hostnames,
           [hostname]: {
-            ...Driver.cache.hostnames[hostname],
-            detections: Driver.cache.hostnames[hostname].detections
+            ...cache,
+            detections: cache.detections
               .filter(({ technology }) => technology)
               .map(
                 ({
                   technology: { name: technology },
                   pattern: { regex, confidence },
                   version,
+                  lastUrl,
                 }) => ({
                   technology,
                   pattern: {
@@ -449,6 +566,7 @@ const Driver = {
                     confidence,
                   },
                   version,
+                  lastUrl,
                 })
               ),
           },
@@ -457,7 +575,23 @@ const Driver = {
       )
     )
 
-    const resolved = resolve(Driver.cache.hostnames[hostname].detections)
+    const resolved = resolve(cache.detections).map((detection) => {
+      detection.cached = detection.lastUrl !== url
+
+      delete detection.lastUrl
+
+      return detection
+    })
+
+    const requires = Wappalyzer.requires.filter(({ name, technologies }) =>
+      resolved.some(({ name: _name }) => _name === name)
+    )
+
+    try {
+      await Driver.content(url, 'analyzeRequires', [requires])
+    } catch (error) {
+      // Continue
+    }
 
     await Driver.setIcon(url, resolved)
 
@@ -494,13 +628,19 @@ const Driver = {
    * @param {Object} technologies
    */
   async setIcon(url, technologies = []) {
+    if (await Driver.isDisabledDomain(url)) {
+      technologies = []
+    }
+
     const dynamicIcon = await getOption('dynamicIcon', false)
+    const showCached = await getOption('showCached', true)
     const badge = await getOption('badge', true)
 
     let icon = 'default.svg'
 
     const _technologies = technologies.filter(
-      ({ slug }) => slug !== 'cart-functionality'
+      ({ slug, cached }) =>
+        slug !== 'cart-functionality' && (showCached || cached === false)
     )
 
     if (dynamicIcon) {
@@ -570,7 +710,11 @@ const Driver = {
       return
     }
 
-    const resolved = Driver.cache.tabs[id]
+    const showCached = await getOption('showCached', true)
+
+    const resolved = (Driver.cache.tabs[id] || []).filter(
+      ({ cached }) => showCached || cached === false
+    )
 
     await Driver.setIcon(url, resolved)
 
@@ -697,9 +841,8 @@ const Driver = {
       const hostnames = Object.keys(Driver.cache.hostnames).reduce(
         (hostnames, hostname) => {
           // eslint-disable-next-line standard/computed-property-even-spacing
-          const { url, language, detections, hits } = Driver.cache.hostnames[
-            hostname
-          ]
+          const { url, language, detections, hits } =
+            Driver.cache.hostnames[hostname]
 
           if (!hostnameIgnoreList.test(hostname) && hits >= 3) {
             hostnames[url] = hostnames[url] || {
